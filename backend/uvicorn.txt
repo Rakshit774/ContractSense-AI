@@ -1,0 +1,11 @@
+cd backend
+
+uvicorn app.main:app --reload --port 8000
+
+http://127.0.0.1:8000/docs
+
+
+clause text:: 
+{
+  "clause_text": "CONSULTANT may terminate this Agreement by giving the COMMISSION at least one hundred and twenty (120) days advance written notice."
+}

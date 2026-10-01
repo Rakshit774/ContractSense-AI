@@ -1,0 +1,49 @@
+# ── ContractSenseAI · requirements.txt ──────────────────────────────
+# Install everything:  pip install -r requirements.txt
+
+# ── Data & EDA ───────────────────────────────────────────────────────
+pandas==2.2.2
+numpy==1.26.4
+matplotlib==3.9.0
+seaborn==0.13.2
+datasets==2.19.1          # HuggingFace datasets (for CUAD reference)
+
+# ── NLP & ML (Weeks 1-4) ────────────────────────────────────────────
+scikit-learn==1.5.0        # TF-IDF + Logistic Regression baseline
+imbalanced-learn==0.12.3   # SMOTE for class imbalance
+joblib==1.4.2              # Save/load sklearn models
+
+# ── Deep Learning / DistilBERT (Week 4) ─────────────────────────────
+torch==2.3.0               # PyTorch (CPU version is fine)
+transformers==4.41.2       # HuggingFace Transformers
+accelerate==0.30.0         # Speeds up HuggingFace Trainer
+
+# ── Embeddings & Vector Store (Week 5-6) ────────────────────────────
+sentence-transformers==2.7.0
+chromadb==0.5.0
+
+# ── PDF Processing (Week 5) ─────────────────────────────────────────
+pymupdf==1.24.4            # Fast PDF text extraction (import as fitz)
+pytesseract==0.3.10        # OCR fallback for scanned PDFs
+Pillow==10.3.0             # Required by pytesseract
+
+# ── RAG Pipeline (Week 5-6) ─────────────────────────────────────────
+langchain==0.2.1
+langchain-community==0.2.1
+langchain-groq==0.1.4      # Groq LLM integration
+groq==0.9.0
+
+# ── Backend (Week 7-8) ──────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn==0.30.0
+python-multipart==0.0.9    # File uploads
+sqlalchemy==2.0.30
+python-jose[cryptography]==3.3.0   # JWT auth
+passlib[bcrypt]==1.7.4
+python-dotenv==1.0.1
+pydantic==2.7.1
+reportlab==4.2.0           # Generate PDF summary reports
+
+# ── Notebook ─────────────────────────────────────────────────────────
+jupyter==1.0.0
+ipykernel==6.29.4
