@@ -11,6 +11,8 @@ from pathlib import Path
 import joblib
 import pymupdf
 import chromadb
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from groq import Groq
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -32,7 +34,19 @@ BACKEND_DIR = APP_DIR.parent
 PROJECT_DIR = BACKEND_DIR.parent
 
 CHROMA_DIR = str(BACKEND_DIR / "chromadb_store")
-CLASSIFIER_PATH = PROJECT_DIR / "models" / "baseline_lr_pipeline.pkl"
+
+# Prefer the locally trained DistilBERT model. Keep Logistic Regression
+# available as a fallback if the DistilBERT files cannot be loaded.
+DISTILBERT_MODEL_DIR = PROJECT_DIR / "models" / "distilbert_risk_classifier"
+BASELINE_CLASSIFIER_PATH = PROJECT_DIR / "models" / "baseline_lr_pipeline.pkl"
+
+# The training script used max_length=128. Keep the same setting at inference.
+CLASSIFIER_MAX_LENGTH = 128
+CLASSIFIER_BATCH_SIZE = 8
+
+CLASSIFIER_DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
 
 REVIEW_CONFIDENCE_THRESHOLD = 0.55
 
@@ -59,7 +73,9 @@ Do not invent contractual facts or provide definitive legal conclusions.
 _embedder = None
 _chroma = None
 _collection = None
-_classifier = None
+_distilbert_tokenizer = None
+_distilbert_model = None
+_baseline_classifier = None
 _groq = None
 
 
@@ -88,13 +104,136 @@ def get_collection():
     return _collection
 
 
-def get_classifier():
-    global _classifier
+def get_distilbert_classifier():
+    """Load the trained DistilBERT model once, using the GPU when available."""
+    global _distilbert_tokenizer, _distilbert_model
 
-    if _classifier is None and CLASSIFIER_PATH.exists():
-        _classifier = joblib.load(CLASSIFIER_PATH)
+    if _distilbert_model is None or _distilbert_tokenizer is None:
+        if not DISTILBERT_MODEL_DIR.exists():
+            return None
 
-    return _classifier
+        try:
+            _distilbert_tokenizer = AutoTokenizer.from_pretrained(
+                str(DISTILBERT_MODEL_DIR),
+                local_files_only=True,
+            )
+
+            _distilbert_model = AutoModelForSequenceClassification.from_pretrained(
+                str(DISTILBERT_MODEL_DIR),
+                local_files_only=True,
+            )
+
+            _distilbert_model.to(CLASSIFIER_DEVICE)
+            _distilbert_model.eval()
+
+            print(
+                "DistilBERT classifier loaded successfully on "
+                f"{CLASSIFIER_DEVICE}."
+            )
+
+        except Exception as exc:
+            # Clear partially initialized objects so the LR fallback can run.
+            _distilbert_tokenizer = None
+            _distilbert_model = None
+            print(
+                "WARNING: Could not load DistilBERT classifier: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+
+    return _distilbert_tokenizer, _distilbert_model
+
+
+def get_baseline_classifier():
+    """Load the Logistic Regression model only when DistilBERT is unavailable."""
+    global _baseline_classifier
+
+    if _baseline_classifier is None and BASELINE_CLASSIFIER_PATH.exists():
+        _baseline_classifier = joblib.load(BASELINE_CLASSIFIER_PATH)
+
+    return _baseline_classifier
+
+
+def predict_distilbert(chunks: list[str]) -> list[tuple[str, float]]:
+    """Return (risk label, confidence) predictions for contract chunks."""
+    loaded = get_distilbert_classifier()
+
+    if loaded is None:
+        raise RuntimeError("The DistilBERT classifier is not available.")
+
+    tokenizer, model = loaded
+    predictions = []
+
+    # Process in small batches to stay within the laptop GPU's 6 GB VRAM.
+    for start in range(0, len(chunks), CLASSIFIER_BATCH_SIZE):
+        batch_chunks = chunks[start:start + CLASSIFIER_BATCH_SIZE]
+
+        encoded = tokenizer(
+            batch_chunks,
+            max_length=CLASSIFIER_MAX_LENGTH,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+
+        encoded = {
+            key: value.to(CLASSIFIER_DEVICE)
+            for key, value in encoded.items()
+        }
+
+        with torch.inference_mode():
+            logits = model(**encoded).logits
+            probabilities = torch.softmax(logits, dim=-1)
+            confidences, predicted_ids = probabilities.max(dim=-1)
+
+        id2label = model.config.id2label
+
+        for predicted_id, confidence in zip(
+            predicted_ids.cpu().tolist(),
+            confidences.cpu().tolist(),
+        ):
+            risk = str(id2label[int(predicted_id)]).upper()
+
+            if risk not in {"RED", "YELLOW", "GREEN"}:
+                raise ValueError(
+                    "Unexpected DistilBERT label in config.json: "
+                    f"{risk}. Expected RED, YELLOW or GREEN."
+                )
+
+            predictions.append((risk, float(confidence)))
+
+    return predictions
+
+
+def predict_risks(chunks: list[str]) -> list[tuple[str, float]]:
+    """Use DistilBERT first, then fall back to Logistic Regression."""
+    try:
+        return predict_distilbert(chunks)
+    except Exception as exc:
+        print(
+            "WARNING: DistilBERT inference failed; trying Logistic "
+            f"Regression fallback. Reason: {type(exc).__name__}: {exc}"
+        )
+
+    classifier = get_baseline_classifier()
+
+    if classifier is None:
+        print(
+            "WARNING: Neither DistilBERT nor the baseline classifier "
+            "is available. Risk labels will be UNKNOWN."
+        )
+        return [("UNKNOWN", 0.0) for _ in chunks]
+
+    labels = classifier.predict(chunks)
+
+    if hasattr(classifier, "predict_proba"):
+        probabilities = classifier.predict_proba(chunks)
+        return [
+            (str(label).upper(), float(max(row)))
+            for label, row in zip(labels, probabilities)
+        ]
+
+    return [(str(label).upper(), 0.0) for label in labels]
 
 
 def get_groq():
@@ -239,12 +378,14 @@ def process_contract(pdf_path: str, document_id: str) -> dict:
 
     embedder = get_embedder()
     collection = get_collection()
-    classifier = get_classifier()
 
     embeddings = embedder.encode(
         chunks,
         show_progress_bar=False,
     )
+
+    # Classify all chunks in batches before storing them in ChromaDB.
+    risk_predictions = predict_risks(chunks)
 
     existing = collection.get(
         where={"document_id": document_id}
@@ -264,17 +405,10 @@ def process_contract(pdf_path: str, document_id: str) -> dict:
     embedding_values = []
     metadatas = []
 
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-        risk = "UNKNOWN"
-        confidence = 0.0
-
-        if classifier is not None:
-            risk = str(classifier.predict([chunk])[0]).upper()
-
-            if hasattr(classifier, "predict_proba"):
-                confidence = float(
-                    max(classifier.predict_proba([chunk])[0])
-                )
+    for i, (chunk, embedding, prediction) in enumerate(
+        zip(chunks, embeddings, risk_predictions)
+    ):
+        risk, confidence = prediction
 
         if risk in risk_counts:
             risk_counts[risk] += 1
