@@ -40,9 +40,10 @@ Feature availability and behaviour may vary with the current implementation.
 
 ### Machine Learning and AI
 - Scikit-learn
-- TF-IDF
-- Logistic Regression
-- DistilBERT experimentation
+- TF-IDF + Logistic Regression (baseline and fallback classifier)
+- Fine-tuned DistilBERT (primary risk classifier)
+- PyTorch and Hugging Face Transformers
+- CUDA-enabled inference when an NVIDIA GPU is available
 - Sentence Transformers
 - ChromaDB
 - Groq API
@@ -63,14 +64,17 @@ The application combines two important workflows: contract risk classification a
 
 ### 2. Risk Classification
 
-The current backend uses a TF-IDF and Logistic Regression pipeline for risk classification.
+The backend uses the locally trained **DistilBERT** sequence-classification model as its primary risk classifier. It predicts one of three labels for each contract chunk:
 
-- **TF-IDF:** Converts text into numerical features based on word importance.
-- **Logistic Regression:** Predicts a risk category from those features.
+- **RED**
+- **YELLOW**
+- **GREEN**
 
-The application groups clauses into RED, YELLOW, GREEN, and UNKNOWN categories. These are model outputs, not guaranteed legal judgments.
+The backend loads the model and tokenizer from `models/distilbert_risk_classifier/`, uses batches of contract chunks, and selects CUDA when available. If CUDA is unavailable, inference can run on the CPU.
 
-DistilBERT was also explored during model development, but it should not be assumed to be the current backend inference model.
+The earlier TF-IDF + Logistic Regression model is retained as a fallback classifier when DistilBERT cannot be loaded or inference fails. If neither classifier is available, chunks are marked UNKNOWN.
+
+The classifier stores the predicted risk label and confidence in ChromaDB metadata. These are machine-learning predictions, not guaranteed legal judgments; users should review important clauses manually.
 
 ### 3. Contract Question Answering (RAG)
 
@@ -113,7 +117,13 @@ ContractSense-AI/
 │   ├── package.json
 │   └── vite.config.js
 ├── models/
-│   └── baseline_lr_pipeline.pkl
+│   ├── baseline_lr_pipeline.pkl
+│   └── distilbert_risk_classifier/
+│       ├── config.json
+│       ├── model.safetensors
+│       ├── tokenizer.json
+│       ├── tokenizer_config.json
+│       └── vocab.txt
 ├── .gitignore
 └── README.md
 ```
@@ -149,13 +159,38 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-Install backend dependencies using the project's existing requirements file, if provided:
+Install dependencies from the repository-root requirements file:
 
 ```powershell
-pip install -r backend/requirements.txt
+pip install -r requirements.txt
 ```
 
-If the requirements file is stored elsewhere, use its actual path. Do not install dependencies from an assumed file location.
+#### DistilBERT model files
+
+The backend expects the trained model and tokenizer artifacts in:
+
+```text
+models/distilbert_risk_classifier/
+```
+
+Place your locally trained model files in that directory before uploading contracts. The model weights (for example, `model.safetensors`) are not necessarily included in a Git checkout; obtain them from the training run or the project maintainer.
+
+#### Optional: NVIDIA GPU inference
+
+CPU inference is supported. To use an NVIDIA GPU on Windows, install a CUDA-enabled PyTorch build compatible with your driver. For the PyTorch 2.3.0 CUDA 12.1 build used during development:
+
+```powershell
+python -m pip uninstall torch -y
+python -m pip install torch==2.3.0 --index-url https://download.pytorch.org/whl/cu121
+```
+
+Verify GPU access:
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+If CUDA is unavailable, the backend selects the CPU.
 
 Configure the environment variables required by the backend. Check the source code and any example environment file for the exact variable names. Keep API keys in a local `.env` file and never commit secrets to GitHub.
 
@@ -260,22 +295,29 @@ Resolve any merge conflicts if they occur.
 
 ContractSenseAI is an ongoing academic project.
 
-**Implemented or developed:**
-- FastAPI backend
-- PDF contract processing
-- ML-based risk classification
-- ChromaDB-based retrieval
-- RAG-based question answering
-- Contract summaries
-- Risk explanations
-- Backend history and deletion endpoints
-- Initial React frontend
+**P1 — Dataset preparation and model development:**
+- Contract dataset exploration, preprocessing and risk mapping
+- TF-IDF + Logistic Regression baseline classifier
+- Fine-tuned DistilBERT risk classifier
+- Model evaluation and comparison
 
-**Planned or pending:**
+**P2 — Application and RAG implementation:**
+- PDF extraction, chunking and embeddings
+- ChromaDB storage and retrieval
+- Groq-powered RAG question answering, summaries and clause explanations
+- FastAPI backend, authentication infrastructure and React frontend
+- Integration of the trained DistilBERT classifier into the backend as the primary risk classifier, with Logistic Regression retained as a fallback
+- CUDA-enabled DistilBERT inference when a compatible NVIDIA GPU is available
+
+**P3 — Remaining improvements and validation:**
+- Manual review of predictions across multiple contracts
+- Further classifier and inference-time benchmarking
 - Frontend login/register integration
 - Counter-proposal frontend integration
-- Further testing and refinement
-- Evaluation of alternative language-model approaches
+- Complete contract history and deletion UI
+- End-to-end testing, documentation and final refinements
+
+The DistilBERT training belongs to P1; its deployment/replacement of the baseline classifier in the application belongs to P2. It is not a new P3 feature.
 
 The exact completion status should be verified against the current codebase before treating every feature as production-ready.
 
